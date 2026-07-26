@@ -1,0 +1,35 @@
+{
+  "name": "linkedin-engagement",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted dashboard that turns the people engaging with your LinkedIn posts into a scored, prioritized lead list.",
+  "license": "MIT",
+  "scripts": {
+    "predev": "prisma migrate deploy",
+    "dev": "next dev",
+    "build": "eslint . && next build",
+    "prestart": "prisma migrate deploy",
+    "start": "next start",
+    "lint": "eslint",
+    "postinstall": "prisma generate"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "chart.js": "^4.5.1",
+    "next": "16.2.10",
+    "prisma": "^6.19.3",
+    "react": "19.2.4",
+    "react-chartjs-2": "^5.3.1",
+    "react-dom": "19.2.4",
+    "server-only": "^0.0.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.10",
+    "typescript": "^5"
+  }
+}

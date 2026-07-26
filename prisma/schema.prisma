@@ -1,0 +1,183 @@
+// Single-user, local-first data model. SQLite so a fresh clone runs with zero
+// database setup; the file lives at prisma/dev.db and is gitignored.
+//
+// Priority Score, Fit Tier, and Outreach Flag are NOT stored columns. They
+// are computed at read time in src/lib/derived.ts, so they can never go stale
+// after a re-score.
+//
+// SQLite has no native enums or scalar lists, so status fields are plain
+// strings (typed as unions in src/lib/types.ts) and syncedPostTitles is a
+// Json array.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+// Exactly one row: you. Created by the first-run setup screen (/setup), which
+// stays reachable afterward to refine the ICP or scoring notes.
+model Account {
+  id                 String   @id @default(cuid())
+  name               String
+  linkedinProfileUrl String
+  // The whole scoring rubric: relevance is fit to THIS description. Describe
+  // your ideal client in observable terms (role, niche, seniority); the
+  // scorer can't see revenue or intent.
+  icpDescription     String
+  coreTopic          String
+  scoringTweaks      String?
+  maxPostsPerRun     Int      @default(5)
+  // > 0 makes the next run reach back through your post history (months),
+  // then self-clears. Set from the setup screen for the first big pull.
+  backfillMonths     Int      @default(0)
+  createdAt          DateTime @default(now())
+
+  people           Person[]
+  companies        Company[]
+  posts            Post[]
+  engagementEvents EngagementEvent[]
+  pipelineRuns     PipelineRun[]
+}
+
+model Person {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  linkedinMemberId String
+  linkedinUrl      String
+  name             String
+  headline         String?
+  aboutSummary     String?
+  followerCount    Int?
+  premiumProfile   Boolean @default(false)
+
+  relevanceScore Int?
+  warmthScore    Int?
+  aiAssessment   String?
+
+  // Human override of the computed Fit Tier (derived.ts). When set, it wins
+  // over the AI-derived tier so you can correct a lead the AI mis-sorted.
+  // One of "STRONG_FIT" | "POSSIBLE" | "NOT_A_FIT"; null means use the AI
+  // score. Plain string so the FitTier values stay defined once in TypeScript.
+  manualFitTier String?
+
+  // How much to trust this person's enrichment (0-100), set at enrich time in
+  // src/lib/ingest.ts from identity-match strength and profile completeness.
+  // Low-confidence records are quarantined into REVIEW_MANUALLY instead of
+  // flowing to SCORED, so a mis-matched or near-empty scrape never shows up
+  // as a confident lead. Null until enriched.
+  enrichmentConfidence Int?
+
+  // "NEW" | "ENRICHED" | "SCORED" | "REVIEW_MANUALLY" (types.ts).
+  lifecycleStatus String @default("NEW")
+
+  // Queue controls, set from the lead row. Dismissed leads leave the default
+  // leads view but are never deleted (restorable). A snoozed lead returns to
+  // the flagged list once snoozedUntil passes.
+  dismissedAt  DateTime?
+  snoozedUntil DateTime?
+
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id])
+
+  engagementEvents EngagementEvent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([accountId, linkedinMemberId])
+}
+
+model Company {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  companyName      String
+  industry         String?
+  nicheDescription String?
+  website          String?
+
+  people Person[]
+
+  @@unique([accountId, companyName])
+}
+
+model Post {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  postTitleHook String
+  postUrl       String
+  datePublished DateTime
+
+  engagementEvents EngagementEvent[]
+
+  @@unique([accountId, postUrl])
+}
+
+model EngagementEvent {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  personId String
+  person   Person @relation(fields: [personId], references: [id])
+
+  postId String?
+  post   Post?   @relation(fields: [postId], references: [id])
+
+  // "COMMENT" | "LIKE" (types.ts): what post scraping can actually observe.
+  eventType        String
+  contentOfComment String?
+  date             DateTime
+
+  createdAt DateTime @default(now())
+
+  @@unique([personId, postId, eventType, date])
+}
+
+model PipelineRun {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  // "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" (types.ts). This table IS
+  // the job queue: triggers only write a QUEUED row, and the worker
+  // (src/lib/worker.ts) claims and executes it.
+  status String @default("QUEUED")
+
+  // A processOnly continuation run: skips all scraping and just drains the
+  // enrichment + scoring backlog a large audience leaves past the per-run
+  // caps. It carries the originating run's id as batchGroupId, so the full
+  // run plus its continuations read as one session in run history. The
+  // effective group key is always `batchGroupId ?? id`.
+  processOnly  Boolean @default(false)
+  batchGroupId String?
+
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  // Durable-worker bookkeeping (src/lib/worker.ts): the worker increments
+  // attempts when it claims a QUEUED run and refreshes heartbeatAt while the
+  // run executes. A RUNNING row with a stale heartbeat was interrupted (crash
+  // or restart) and is re-queued automatically, up to a small attempts cap.
+  attempts    Int       @default(0)
+  heartbeatAt DateTime?
+
+  postsSynced Int?
+  // Titles of the posts this run's scrape stored (Step 1), so run history can
+  // show what a run was built on. A JSON string[] (SQLite has no scalar
+  // lists); empty on processOnly continuations, which don't scrape.
+  syncedPostTitles Json @default("[]")
+  peopleFound    Int?
+  peopleEnriched Int?
+  peopleScored   Int?
+  errorMessage   String?
+}
